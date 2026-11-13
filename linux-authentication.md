@@ -443,8 +443,8 @@ Host_Alias       ← алиас
 > 
 > **Пример:** один и тот же файл `ldap-sudo` лежит на `srv_ldap`, `srv_bastion`, `srv_fs`, `ws_msk_*`. В нём написано:
 > ```sudoers
-> %SG-ADM-T1-SRV-LINUX-ADMINS srv_ldap,srv_bastion=(ALL) /usr/bin/systemctl
-> %SG-ADM-T1-SRV-LINUX-ADMINS srv_fs=(ALL) /usr/bin/systemctl restart smbd
+> %sg-linux-admins srv_ldap,srv_bastion=(ALL) /usr/bin/systemctl
+> %sg-linux-admins srv_fs=(ALL) /usr/bin/systemctl restart smbd
 > ```
 > **Смысл:** админы Linux-серверов могут перезапускать *любые* сервисы на `srv_ldap` и `srv_bastion`, но на `srv_fs` — *только* `smbd`. Один файл, разные правила для разных хостов.
 
@@ -474,8 +474,8 @@ Host_Alias       ← алиас
 > 
 > **В sudoers пишем:**
 > ```sudoers
-> %SG-ADM-T1-NET-ADMINS bastion=(ALL) /usr/sbin/nft
-> %SG-ADM-T1-SRV-DNS-ADMINS bastion=(ALL) /usr/sbin/named
+> %sg-linux-admins bastion=(ALL) /usr/sbin/nft
+> %sg-linux-admins bastion=(ALL) /usr/sbin/named
 > ```
 > **Смысл:** один хост, но разные группы получают разные права в зависимости от роли. Без поля «ГДЕ» пришлось бы делать два отдельных файла.
 
