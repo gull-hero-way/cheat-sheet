@@ -1,6 +1,6 @@
 
 
-# 🐧 Samba + LDAP: интеграция и разграничению доступа
+# 🐧 Samba + LDAP: интеграция и разграничение доступа
 
 ![Samba](https://img.shields.io/badge/Software-Samba-blue.svg)
 ![LDAP](https://img.shields.io/badge/Protocol-LDAP-orange.svg)
