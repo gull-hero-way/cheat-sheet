@@ -25,6 +25,13 @@
   - [3.1. `access.conf` — «Кто откуда может входить»](#31-accessconf--кто-откуда-может-входить)
   - [3.2. `sudoers` — «Что можно делать через sudo»](#32-sudoers--что-можно-делать-через-sudo)
   - [3.3. Сравнение `access.conf` и `sudoers`](#33-сравнение-accessconf-и-sudoers)
+- [4. LDAP](#4-ldap)
+  - [4.1. Архитектура](#41-архитектура)
+  - [4.2. Как Overlay работает на практике (на примере ppolicy)](#42-как-overlay-работает-на-практике-на-примере-ppolicy)
+  - [4.3. Ключевые компоненты Overlay на сервере](#43-ключевые-компоненты-overlay-на-сервере)
+  - [4.4. Дерево 1: Конфигурация сервера (`cn=config`)](#44-дерево-1-конфигурация-сервера-cnconfig)
+  - [4.5. Дерево 2: Данные (`dc=local,dc=host`)](#45-дерево-2-данные-dclocaldchost)
+  - [4.6. Связь между деревьями и маршрут BIND-запроса](#46-связь-между-деревьями-и-маршрут-bind-запроса)
 
 ---
 
@@ -691,6 +698,7 @@ systemctl              ← НЕПРАВИЛЬНО (sudo не найдёт)
 **Но:** Ansible-проверка (`test_p.yaml`) ожидает **именно** `ALL=(ALL:ALL) ALL` для `localadmin` (по Инструкции). Если урежем — проверка покажет `NOT OK`. Поэтому оставляем как есть, а рекомендацию фиксируем в отчёте как «доработку стандарта».
 
 ---
+
 ## 3.3. Сравнение `access.conf` и `sudoers`
 
 | Критерий | `access.conf` | `sudoers` |
@@ -702,7 +710,7 @@ systemctl              ← НЕПРАВИЛЬНО (sudo не найдёт)
 | **Группа** | `(group)` или `group` | `%group` |
 | **«Всё»** | `ALL` | `ALL` |
 | **Отрицание** | `-` в начале строки | `!` перед командой |
-| **Порядок важен** | ✅ да (первое совпадение) | ✅ да (последнее совпадение для `!`) |
+| **Порядок важен** | да (первое совпадение) | да (последнее совпадение для `!`) |
 
 **Ключевое различие:**
 - `access.conf` — «**пускать или нет**» (бинарно).
@@ -711,3 +719,331 @@ systemctl              ← НЕПРАВИЛЬНО (sudo не найдёт)
 **Аналогия:**
 - `access.conf` — охранник на входе: «тебя нет в списке — не пущу».
 - `sudoers` — пропускной режим внутри: «тебе можно в этот кабинет, но не в тот».
+
+## 4. LDAP
+
+### 4.1. Архитектура
+
+Сервер LDAP (демон slapd) состоит из нескольких уровней:
+
+*   **Backend (Бэкенд):** Это «движок» базы данных. Именно он физически хранит и извлекает записи (пользователей, группы, политики). В нашем случае используется бэкенд mdb, который хранит данные в файлах /var/lib/ldap/data.mdb.
+*   **Frontend (Фронтенд):** Это «приёмная», которая принимает все запросы от клиентов (например, от pam_sss на рабочей станции) и передаёт их нужному бэкенду.
+*   **Overlay (Оверлей):** Это «слой-посредник» или «плагин», который встраивается между фронтендом и бэкендом. Он перехватывает все запросы и ответы, проходящие через него, и может их изменять.
+
+Overlay — это не часть базы данных и не схема. Это отдельный программный модуль, который «вклинивается» в работу сервера и меняет его поведение, не изменяя код самого бэкенда.
+
+---
+
+### 4.2. Как Overlay работает на практике (на примере ppolicy)
+
+*   **Без overlay ppolicy:** Сервер LDAP просто хранит хеш пароля в атрибуте userPassword. Когда клиент пытается аутентифицироваться, сервер просто сравнивает хеши. Он ничего не знает о количестве неудачных попыток, сроке действия пароля или его сложности.
+*   **С overlay ppolicy:** Модуль ppolicy перехватывает каждый запрос на аутентификацию (Bind) и каждую операцию смены пароля. Он смотрит на атрибуты пользователя (pwdFailureTime, pwdMinLength и т.д.) и принимает решение:
+    *   «Пароль неверный, добавляю отметку о неудаче».
+    *   «Количество неудач превысило 5, блокирую учётную запись».
+    *   «Новый пароль слишком короткий, отклоняю смену».
+    *   «Срок действия пароля истёк, требую смены».
+
+Именно поэтому в common-auth на клиенте не нужно ничего менять. pam_sss просто спрашивает LDAP: «Пароль верный?». А внутри LDAP этот вопрос уже обрабатывает ppolicy, который может ответить не только «да/нет», но и «учётка заблокирована».
+
+---
+
+### 4.3. Ключевые компоненты Overlay на сервере
+
+Чтобы ppolicy заработал, на сервере должны быть выполнены три условия, и каждое — это отдельный «слой»:
+
+1.  **Модуль (файл .so):** Это сам код overlay. Файл ppolicy.la или ppolicy.so лежит в /usr/lib/ldap/ (или /usr/lib/x86_64-linux-gnu/ldap/). Он подключается в конфигурации cn=config через атрибут olcModuleLoad: ppolicy. Это как «установить плагин».
+2.  **Схема (ppolicy.schema):** Это описание атрибутов, которые использует overlay (pwdMinLength, pwdMaxFailure и т.д.). Файл лежит в /etc/ldap/schema/ppolicy.schema. Без него сервер не поймёт, что означает атрибут pwdMinLength. Схема — это «словарь», который понимает overlay.
+3.  **Экземпляр overlay (olcOverlay):** Это «включение» плагина для конкретной базы данных. В cn=config создаётся запись:
+```text
+dn: olcOverlay={2}ppolicy,olcDatabase={1}mdb,cn=config
+objectClass: olcPPolicyConfig
+olcOverlay: ppolicy
+olcPPolicyDefault: cn=default,ou=Policies,dc=local,dc=host
+```
+
+---
+
+### 4.4. Дерево 1: Конфигурация сервера (`cn=config`)
+
+```text
+
+cn=config
+│
+├── cn=schema,cn=config                          
+│   │   └── КОНТЕЙНЕР ДЛЯ ВСЕХ СХЕМ. Здесь хранятся "словари" атрибутов.
+│   │       Каждая схема — отдельная запись с номером {N} (порядок загрузки).
+│   │
+│   ├── cn={0}core,cn=schema,cn=config           
+│   │   └── БАЗОВАЯ СХЕМА. Атрибуты: cn, sn, uid, objectClass, dc, ou...
+│   │       Загружается ПЕРВОЙ (все остальные на неё ссылаются).
+│   │
+│   ├── cn={1}cosine,cn=schema,cn=config         
+│   │   └── СХЕМА COSINE (европейский стандарт). Атрибуты: mail,
+│   │       telephoneNumber, postalAddress, description...
+│   │       Загружается ВТОРОЙ.
+│   │
+│   ├── cn={2}nis,cn=schema,cn=config            
+│   │   └── СХЕМА NIS (для совместимости с Unix). Атрибуты:
+│   │       uidNumber, gidNumber, homeDirectory, loginShell...
+│   │       Нужна для того, чтобы Linux видел LDAP-пользователей.
+│   │
+│   ├── cn={3}inetorgperson,cn=schema,cn=config   
+│   │   └── СХЕМА INETORGPERSON (для людей). Атрибуты:
+│   │       givenName, displayName, employeeNumber, manager...
+│   │
+│   ├── cn={4}ppolicy,cn=schema,cn=config        ← ★ СХЕМА PWPOLICY
+│   │   └── «СЛОВАРЬ» ДЛЯ OVERLAY PPOLICY. Определяет:
+│   │       - olcAttributeTypes: pwdMinLength (число, мин. длина)
+│   │       - olcAttributeTypes: pwdMaxAge (число, срок в секундах)
+│   │       - olcAttributeTypes: pwdMaxFailure (число, макс. неудач)
+│   │       - olcAttributeTypes: pwdLockout (boolean, блокировать?)
+│   │       - olcAttributeTypes: pwdInHistory (число, история)
+│   │       - olcAttributeTypes: pwdFailureTime (время неудач)
+│   │       - olcObjectClasses: pwdPolicy (класс для политики)
+│   │       - olcObjectClasses: pwdPolicyChecker (класс для check_password)
+│   │       
+│   │       БЕЗ ЭТОЙ СХЕМЫ: сервер не поймёт, что такое "pwdMinLength".
+│   │       Он увидит атрибут, но не будет знать его тип и назначение.
+│   │
+│   └── cn={5}check_password,cn=schema,cn=config  
+│       └── СХЕМА ДЛЯ МОДУЛЯ check_password. Определяет:
+│           - olcAttributeTypes: pwdCheckModule (имя .so-файла)
+│           Нужна, чтобы политика могла сослаться на check_password.so
+│
+├── cn=module{0},cn=config                       ← ★ МОДУЛИ (КОД)
+│   │   └── КОНТЕЙНЕР ДЛЯ ЗАГРУЖЕННЫХ .SO-ФАЙЛОВ. Здесь перечислено,
+│   │       какие плагины загружены в память сервера.
+│   │
+│   │   olcModuleLoad: ppolicy                  
+│   │   └── «Загрузи /usr/lib/ldap/ppolicy.so» — это КОД overlay ppolicy.
+│   │       После загрузки сервер УМЕЕТ обрабатывать парольные политики.
+│   │       Но пока не применяет ни к какой базе — нужно olcOverlay ниже.
+│   │
+│   │   olcModuleLoad: check_password            
+│   │   └── «Загрузи /usr/lib/ldap/check_password.so» — это КОД для
+│   │       проверки сложности пароля (используется в pwdCheckModule).
+│   │
+│   │   olcModuleLoad: memberof                  
+│   │   └── (если есть) модуль для автоматического заполнения
+│   │       обратных ссылок в группах.
+│   │
+│   │   olcModulePath: /usr/lib/ldap/            
+│   │   └── ГДЕ ИСКАТЬ .so-файлы (директория с модулями).
+│   │
+│   └── (module{1}, module{2}... если загружались разными записями)
+│
+├── olcDatabase={-1}frontend,cn=config           ← ФРОНТЕНД
+│   └── «ПРИЁМНАЯ». Принимает все запросы от клиентов и решает,
+│       какому бэкенду их передать. Не хранит данные.
+│
+├── olcDatabase={0}config,cn=config              ← САМА CN=CONFIG
+│   └── База данных для конфигурации (то, что мы сейчас читаем).
+│       Управляется только через ldapi:/// + EXTERNAL (root).
+│
+└── olcDatabase={1}mdb,cn=config                 ← ★ НАША БАЗА ДАННЫХ
+    │   └── БАЗА MDB (LMDB). Здесь ЛЕЖАТ ВСЕ ДАННЫЕ:
+    │       пользователи, группы, политики (дерево dc=local,dc=host).
+    │
+    │   olcSuffix: dc=local,dc=host
+    │   └── «Я отвечаю за записи, которые заканчиваются на dc=local,dc=host»
+    │
+    │   olcDbDirectory: /var/lib/ldap
+    │   └── «Мои файлы лежат в /var/lib/ldap/» (data.mdb, lock.mdb)
+    │
+    ├── olcOverlay={0}memberof,olcDatabase={1}mdb,cn=config
+    │   └── OVERLAY MEMBEROF. Автоматически заполняет атрибут memberOf
+    │       у пользователя, когда его добавляют в группу.
+    │       (У нас может быть не загружен — не критично)
+    │
+    └── olcOverlay={2}ppolicy,olcDatabase={1}mdb,cn=config   ← ★ OVERLAY PPOLICY
+        │   └── «Я — overlay ppolicy. Применяюсь КО ВСЕЙ базе mdb.»
+        │       С этого момента КАЖДЫЙ BIND-запрос (проверка пароля)
+        │       проходит через меня.
+        │
+        │   objectClass: olcOverlayConfig
+        │   └── «Я — конфигурация overlay» (базовый класс, обязательный)
+        │
+        │   objectClass: olcPPolicyConfig
+        │   └── «Я — конфигурация ИМЕННО ppolicy» (специфичный класс,
+        │       разрешает использовать olcPPolicyDefault)
+        │
+        │   olcOverlay: ppolicy
+        │   └── «Какой модуль использовать» → ppolicy.so (из cn=module)
+        │
+        └── olcPPolicyDefault: cn=default,ou=Policies,dc=local,dc=host
+            └── «Политика ПО УМОЛЧАНИЮ». Если у пользователя НЕТ
+                pwdPolicySubentry — применю ЭТУ политику.
+                (Наша страховка для admin, srv_ldap_reader и т.д.)
+```
+
+---
+
+### 4.5. Дерево 2: Данные (`dc=local,dc=host`)
+
+```text
+dc=local,dc=host                                ← КОРЕНЬ ДАННЫХ
+│   └── (это база mdb из ДЕРЕВА 1)
+│
+├── ou=Users                                    ← КОНТЕЙНЕР ПОЛЬЗОВАТЕЛЕЙ
+│   │
+│   ├── cn=Иванов Алексей,ou=Users
+│   │   │   ├── objectClass: inetOrgPerson      ← «я — человек»
+│   │   │   ├── objectClass: posixAccount       ← «у меня есть UID для Linux»
+│   │   │   ├── uid: aivanov
+│   │   │   ├── cn: Иванов Алексей
+│   │   │   ├── uidNumber: 1000
+│   │   │   ├── gidNumber: 500
+│   │   │   ├── userPassword: {SSHA}xxxxx       ← ХЕШ ПАРОЛЯ
+│   │   │   ├── pwdPolicySubentry: cn=pwdPolicyUsers,ou=Policies,dc=local,dc=host
+│   │   │   │   └── ★ ПРИВЯЗКА К ПОЛИТИКЕ #2
+│   │   │   │       «К моему паролю применяй правила из pwdPolicyUsers»
+│   │   │   └── pwdFailureTime: (пусто / список временных меток)
+│   │   │       └── ★ СЧЁТЧИК НЕУДАЧ, ведёт ppolicy
+│   │   │
+│   ├── cn=Петров Игорь,ou=Users
+│   │   │   ├── pwdPolicySubentry: cn=pwdPolicyUsers,ou=Policies,...  ← ★ #2
+│   │   │   └── ...
+│   │   │
+│   └── ou=Service Accounts,ou=Users            ← ВЛОЖЕННЫЙ КОНТЕЙНЕР
+│       │
+│       ├── cn=svc_admin_it
+│       │   │   ├── pwdPolicySubentry: cn=pwdPolicyService,ou=Policies,...  ← ★ #3
+│       │   │   └── ...
+│       │   │
+│       └── cn=svc_admin_ib
+│           │   ├── pwdPolicySubentry: cn=pwdPolicyService,ou=Policies,...  ← ★ #3
+│           │   └── ...
+│
+├── ou=Groups                                   ← КОНТЕЙНЕР ГРУПП
+│   │
+│   ├── ou=ORG,ou=Groups                        ← Организационные (SG-ORG-*)
+│   │   ├── cn=SG-ORG-IT-USERS
+│   │   │   │   ├── objectClass: groupOfNames
+│   │   │   │   ├── cn: SG-ORG-IT-USERS
+│   │   │   │   └── member: cn=Иванов Алексей,ou=Users,...    ← ★ ПРИВЯЗКА
+│   │   │   │       member: cn=Петров Игорь,ou=Users,...         «кто в группе»
+│   │   │   │       (это НЕ привязка к политике — это членство в группе,
+│   │   │   │        используется для access.conf, sudoers, файловых прав)
+│   │   │   │
+│   │   │   └── cn=SG-ORG-LEGAL-USERS
+│   │   │       └── member: cn=Чернов Павел,ou=Users,...
+│   │   │
+│   │   ├── ou=ADM,ou=Groups                    ← Административные (SG-ADM-*)
+│   │   │   ├── cn=SG-ADM-T0-DIRECTORY-ADMINS
+│   │   │   │   └── member: cn=svc_admin_it,ou=Service Accounts,...
+│   │   │   │       member: cn=svc_admin_ib,ou=Service Accounts,...
+│   │   │   │
+│   │   │   └── cn=SG-ADM-T1-SRV-LINUX-ADMINS
+│   │   │       └── member: cn=adm_ajukov,ou=Users,...
+│   │   │
+│   │   └── ou=RES,ou=Groups                    ← Ресурсные (SG-RES-*)
+│   │       └── cn=SG-RES-SHARE-hq_dep_log-RW
+│   │           └── member: cn=SG-ORG-LOG-USERS,ou=ORG,ou=Groups,... (вложенная группа)
+│   │
+│   └── (другие OU)
+│
+└── ou=Policies                                 ← ★ КОНТЕЙНЕР ПОЛИТИК
+    │   └── (сюда ссылаются pwdPolicySubentry и olcPPolicyDefault)
+    │
+    ├── cn=default                              ← ★ ПОЛИТИКА #1: глобальная
+    │   │   ├── objectClass: pwdPolicy           ← «я — политика паролей»
+    │   │   ├── objectClass: device
+    │   │   ├── cn: default
+    │   │   ├── pwdAttribute: userPassword        ← «проверяю атрибут userPassword»
+    │   │   ├── pwdMinLength: 8                   ← МИН. ДЛИНА = 8
+    │   │   ├── pwdMaxAge: 15552000               ← СРОК = 180 дней
+    │   │   ├── pwdMaxFailure: 5                  ← МАКС. НЕУДАЧ = 5
+    │   │   ├── pwdLockout: TRUE                  ← БЛОКИРОВАТЬ
+    │   │   ├── pwdLockoutDuration: 900           ← НА 15 МИНУТ
+    │   │   ├── pwdInHistory: 3                   ← ИСТОРИЯ = 3
+    │   │   └── ...
+    │   │   └── ★ КТО ИСПОЛЬЗУЕТ: те, у кого НЕТ pwdPolicySubentry
+    │   │       (admin, srv_ldap_reader, все «вне OU»)
+    │   │
+    ├── cn=pwdPolicyUsers                       ← ★ ПОЛИТИКА #2: для ou=Users
+    │   │   ├── objectClass: pwdPolicy           ← «я — политика паролей»
+    │   │   ├── objectClass: pwdPolicyChecker    ← «я умею вызывать check_password»
+    │   │   ├── objectClass: person
+    │   │   ├── cn: pwdPolicyUsers
+    │   │   ├── pwdAttribute: 2.5.4.35            ← userPassword (OID)
+    │   │   ├── pwdMinLength: 8                   ← МИН. ДЛИНА = 8
+    │   │   ├── pwdMaxAge: 15552000               ← СРОК = 180 дней
+    │   │   ├── pwdMaxFailure: 5                  ← МАКС. НЕУДАЧ = 5
+    │   │   ├── pwdLockout: TRUE                  ← БЛОКИРОВАТЬ
+    │   │   ├── pwdLockoutDuration: 900           ← НА 15 МИНУТ
+    │   │   ├── pwdInHistory: 3                   ← ИСТОРИЯ = 3
+    │   │   ├── pwdCheckModule: check_password.so ← «проверяй через check_password»
+    │   │   ├── pwdMustChange: TRUE               ← «смени пароль при входе»
+    │   │   └── ...
+    │   │   └── ★ КТО ИСПОЛЬЗУЕТ: все в ou=Users
+    │   │       (Иванов, Петров, Сидоров...)
+    │   │
+    └── cn=pwdPolicyService                     ← ★ ПОЛИТИКА #3: для svc_*
+        │   ├── objectClass: pwdPolicy
+        │   ├── objectClass: pwdPolicyChecker
+        │   ├── objectClass: person
+        │   ├── cn: pwdPolicyService
+        │   ├── pwdAttribute: 2.5.4.35
+        │   ├── pwdMinLength: 8
+        │   ├── pwdMaxAge: 15552000
+        │   ├── pwdMaxFailure: 5
+        │   ├── pwdLockout: TRUE
+        │   ├── pwdLockoutDuration: 900
+        │   ├── pwdInHistory: 3
+        │   ├── pwdCheckModule: check_password.so
+        │   ├── pwdGraceAuthNLimit: 3             ← ★ ОТЛИЧИЕ: grace = 3 (а не 5)
+        │   └── ...
+        │   └── ★ КТО ИСПОЛЬЗУЕТ: все в ou=Service Accounts
+        │       (svc_admin_it, svc_admin_ib, svc_ansible)
+```
+
+---
+
+### 4.6. Связь между деревьями и маршрут BIND-запроса
+
+**Дерево LDAP: где что лежит структурно**
+
+LDAP состоит из двух независимых деревьев:
+*   **cn=config** — конфигурация самого сервера (модули, схемы, overlays). Здесь живет «движок».
+*   **dc=local,dc=host** — данные (пользователи, группы, политики). Здесь живет «содержимое».
+
+Связь между ними: `olcOverlay` в `cn=config` применяется к базе `olcDatabase={1}mdb`, а внутри этой базы лежат политики `ou=Policies`.
+
+**Маршрут BIND-запроса (как это работает вживую):**
+
+```text
+1. ws_msk_000019: pam_sss → LDAP: "Пароль 'qwerty' для ivanov верный?"
+   ↓
+2. LDAP: slapd принимает BIND-запрос
+   ↓
+3. slapd: "проходит ли этот запрос через overlay?"
+   → проверяет olcOverlay={2}ppolicy для базы mdb
+   → ДА, проходит
+   ↓
+4. ppolicy: "какая политика у ivanov?"
+   → ldapsearch -b "cn=Иванов Алексей,ou=Users,..." pwdPolicySubentry
+   → находит: cn=pwdPolicyUsers,ou=Policies,dc=local,dc=host
+   ↓
+5. ppolicy: "читаю политику cn=pwdPolicyUsers"
+   → pwdMinLength: 8
+   → pwdMaxAge: 15552000
+   → pwdMaxFailure: 5
+   → pwdLockout: TRUE
+   → pwdLockoutDuration: 900
+   ↓
+6. ppolicy: "проверяю"
+   ├─ Пароль верный?
+   ├─ Счётчик pwdFailureTime < 5?
+   ├─ Срок действия не истёк?
+   └─ ...
+   ↓
+7. ppolicy: "результат"
+   ├─ Всё ок → возвращаю "success" (и сбрасываю pwdFailureTime)
+   ├─ Неверный пароль → pwdFailureTime++ (и возвращаю "invalid credentials")
+   └─ Счётчик >= 5 → возвращаю "account locked"
+   ↓
+8. pam_sss: получает ответ → передаёт наверх
+   ↓
+9. sshd: "пускаю / не пускаю"
+```
+
