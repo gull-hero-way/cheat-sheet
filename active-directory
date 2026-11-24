@@ -1,0 +1,61 @@
+Лес: contoso.com
+│
+├── Домен: contoso.com
+│   DN: DC=contoso,DC=com
+│   │
+│   ├── OU: HeadOffice
+│   │   DN: OU=HeadOffice,DC=contoso,DC=com
+│   │   │
+│   │   ├── OU: Users
+│   │   │   DN: OU=Users,OU=HeadOffice,DC=contoso,DC=com
+│   │   │   ├── CN: Ivan Petrov
+│   │   │   │   DN: CN=Ivan Petrov,OU=Users,OU=HeadOffice,DC=contoso,DC=com
+│   │   │   ├── CN: Anna Sidorova
+│   │   │   │   DN: CN=Anna Sidorova,OU=Users,OU=HeadOffice,DC=contoso,DC=com
+│   │   │   └── CN: Dmitry Kozlov                        
+│   │   │       DN: CN=Dmitry Kozlov,OU=Users,OU=HeadOffice,DC=contoso,DC=com
+│   │   │
+│   │   ├── OU: Computers
+│   │   │   DN: OU=Computers,OU=HeadOffice,DC=contoso,DC=com
+│   │   │   └── CN: PC-001
+│   │   │       DN: CN=PC-001,OU=Computers,OU=HeadOffice,DC=contoso,DC=com
+│   │   │
+│   │   └── OU: Groups
+│   │       DN: OU=Groups,OU=HeadOffice,DC=contoso,DC=com
+│   │       ├── CN: Sales Team
+│   │       │   DN: CN=Sales Team,OU=Groups,OU=HeadOffice,DC=contoso,DC=com
+│   │       ├── CN: IT Support                         
+│   │       │   DN: CN=IT Support,OU=Groups,OU=HeadOffice,DC=contoso,DC=com
+│   │       └── CN: Finance Team                         
+│   │           DN: CN=Finance Team,OU=Groups,OU=HeadOffice,DC=contoso,DC=com
+│   │
+│   ├── OU: Branch
+│   │   DN: OU=Branch,DC=contoso,DC=com
+│   │   ├── OU: Users
+│   │   │   DN: OU=Users,OU=Branch,DC=contoso,DC=com
+│   │   │   ├── CN: Oleg Ivanov
+│   │   │   │   DN: CN=Oleg Ivanov,OU=Users,OU=Branch,DC=contoso,DC=com
+│   │   │   └── CN: Elena Morozova             
+│   │   │       DN: CN=Elena Morozova,OU=Users,OU=Branch,DC=contoso,DC=com
+│   │   │
+│   │   └── OU: Groups
+│   │       DN: OU=Groups,OU=Branch,DC=contoso,DC=com
+│   │       └── CN: VPN Users
+│   │           DN: CN=VPN Users,OU=Groups,OU=Branch,DC=contoso,DC=com
+│   │
+│   ├── CN: Users
+│   │   DN: CN=Users,DC=contoso,DC=com
+│   │   └── CN: Administrator
+│   │       DN: CN=Administrator,CN=Users,DC=contoso,DC=com
+│   │
+│   └── CN: Computers
+│       DN: CN=Computers,DC=contoso,DC=com
+│
+└── Дочерний домен: eu.contoso.com
+    DN: DC=eu,DC=contoso,DC=com
+    └── OU: Users
+        DN: OU=Users,DC=eu,DC=contoso,DC=com
+        ├── CN: Maria Petrova
+        │   DN: CN=Maria Petrova,OU=Users,DC=eu,DC=contoso,DC=com
+        └── CN: Sergey Volkov
+            DN: CN=Sergey Volkov,OU=Users,DC=eu,DC=contoso,DC=com
